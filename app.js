@@ -14,14 +14,25 @@ const request = require("request");
 const OAuth2Strategy = require("passport-oauth2");
 const YahooFantasy = require("yahoo-fantasy");
 const RedisStore = require("connect-redis")(session);
+const mongoose = require("mongoose");
+
+mongoose.connect(process.env.MONGOHQ_URL || require("./conf.js").MONGO_DB, {
+  useMongoClient: true
+});
+
+const User = require("./lib/schema/user");
+
+const db = mongoose.connection;
+db.on("error", console.error.bind(console, "connection error:"));
+db.once("open", () => {
+  console.log("Connected to Mongo!");
+});
 
 const index = require("./routes/index");
 
 const REDIS_URL = process.env.REDIS_URL
   ? process.env.REDIS_URL
   : require("./conf.js").REDIS_URL;
-
-const client = redis.createClient(REDIS_URL);
 
 passport.serializeUser(function(user, done) {
   done(null, user);
@@ -58,21 +69,38 @@ passport.use(
       request(options, (error, response, body) => {
         if (!error && response.statusCode == 200) {
           const userObj = {
-            id: body.profile.guiid,
-            name: body.profile.nickname,
+            guid: body.profile.guid,
+            nickname: body.profile.nickname,
             avatar: body.profile.image.imageUrl,
-            accessToken: accessToken,
-            refreshToken: refreshToken
+            access_token: accessToken,
+            refresh_token: refreshToken
           };
 
-          app.yf.setUserToken(accessToken);
-
-          return done(null, userObj);
+          return loginUser(userObj, done);
         }
       });
     }
   )
 );
+
+function loginUser(userObj, done) {
+  User.findOne({ guid: userObj.guid }, (err, user) => {
+    if (err) return done(err, null);
+
+    if (user) {
+      app.yf.setUserToken(userObj.access_token);
+      return done(null, user);
+    }
+
+    new User(
+      Object.assign(userObj, { created_at: new Date() })
+    ).save((err, user) => {
+      if (err) return done(err, null);
+
+      return loginUser(userObj, done);
+    });
+  });
+}
 
 const app = express();
 
@@ -81,6 +109,7 @@ app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "jade");
 
 app.yf = new YahooFantasy(APP_KEY, APP_SECRET);
+app.db = db;
 
 // uncomment after placing your favicon in /public
 //app.use(favicon(path.join(__dirname, 'public', 'favicon.ico')));
@@ -90,12 +119,14 @@ app.use(bodyParser.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(
   session({
-    secret: "keyboard cat",
-    resave: false,
+    secret: require("./conf.js").SESSION_SECRET || "dj kitty",
+    resave: true,
     saveUninitialized: true,
+    maxAge: 3600000,
     store: new RedisStore({
       port: process.env.REDIS_PORT || require("./conf.js").REDIS_PORT,
-      host: process.env.REDIS_HOST || require("./conf.js").REDIS_HOST
+      host: process.env.REDIS_HOST || require("./conf.js").REDIS_HOST,
+      logErrors: true
     })
   })
 );
@@ -109,7 +140,10 @@ app.get("/login", (req, res) => {
 
 app.get(
   "/auth/yahoo",
-  passport.authenticate("oauth2", { failureRedirect: "/login" }),
+  passport.authenticate("oauth2", {
+    successRedirect: "/",
+    failureRedirect: "/login"
+  }),
   (req, res, user) => {
     res.redirect("/");
   }
@@ -125,7 +159,8 @@ app.get(
 
 app.get("/logout", (req, res) => {
   req.logout();
-  res.redirect(req.session.redirect || "/");
+
+  return res.redirect("/login");
 });
 
 app.use("/", checkAuth, index);
@@ -134,18 +169,16 @@ function checkAuth(req, res, next) {
   let userObj;
 
   if (req.isAuthenticated()) {
-    userObj = {
+    req.userObj = {
       name: req.user.name,
       avatar: req.user.avatar
     };
+
+    return next();
   } else {
     userObj = null;
     return res.redirect("/login");
   }
-
-  req.userObj = userObj;
-
-  next();
 }
 
 // catch 404 and forward to error handler
