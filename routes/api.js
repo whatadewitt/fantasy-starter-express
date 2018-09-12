@@ -2,7 +2,6 @@
 
 const express = require("express");
 const router = express.Router();
-const async = require("async");
 const request = require("request");
 
 const User = require("../lib/schema/user");
