@@ -16,9 +16,7 @@ const YahooFantasy = require("yahoo-fantasy");
 const RedisStore = require("connect-redis")(session);
 const mongoose = require("mongoose");
 
-mongoose.connect(process.env.MONGOHQ_URL || require("./conf.js").MONGO_DB, {
-  useMongoClient: true
-});
+mongoose.connect(process.env.MONGOHQ_URL || require("./conf.js").MONGO_DB);
 
 const User = require("./lib/schema/user");
 
@@ -29,10 +27,15 @@ db.once("open", () => {
 });
 
 const index = require("./routes/index");
+const api = require("./routes/api");
 
-const REDIS_URL = process.env.REDIS_URL
-  ? process.env.REDIS_URL
-  : require("./conf.js").REDIS_URL;
+const REDIS_HOST = process.env.REDIS_HOST
+  ? process.env.REDIS_HOST
+  : require("./conf.js").REDIS_HOST;
+
+const REDIS_PORT = process.env.REDIS_PORT
+  ? process.env.REDIS_PORT
+  : require("./conf.js").REDIS_PORT;
 
 passport.serializeUser(function(user, done) {
   done(null, user);
@@ -85,20 +88,39 @@ passport.use(
 
 function loginUser(userObj, done) {
   User.findOne({ guid: userObj.guid }, (err, user) => {
-    if (err) return done(err, null);
-
-    if (user) {
-      app.yf.setUserToken(userObj.access_token);
-      return done(null, user);
+    if (err) {
+      return done(err);
     }
 
-    new User(
-      Object.assign(userObj, { created_at: new Date() })
-    ).save((err, user) => {
-      if (err) return done(err, null);
+    if (user) {
+      User.update(
+        { _id: user._id },
+        {
+          access_token: userObj.access_token,
+          refresh_token: userObj.refresh_token
+        },
+        (err, updatedUser) => {
+          if (err) {
+            // todo: not this...
+            console.log("err");
+            return done(err);
+          }
 
-      return loginUser(userObj, done);
-    });
+          return done(null, userObj);
+        }
+      );
+    }
+
+    // create new user
+    new User(Object.assign(userObj, { created_at: new Date() })).save(
+      (err, user) => {
+        if (err) {
+          return done(err);
+        }
+
+        return loginUser(userObj, done);
+      }
+    );
   });
 }
 
@@ -123,26 +145,27 @@ app.use(
     resave: true,
     saveUninitialized: true,
     maxAge: 3600000,
+    cookie: { secure: false },
     store: new RedisStore({
-      port: process.env.REDIS_PORT || require("./conf.js").REDIS_PORT,
-      host: process.env.REDIS_HOST || require("./conf.js").REDIS_HOST,
+      host: REDIS_HOST,
+      port: REDIS_PORT,
       logErrors: true
     })
   })
 );
-app.use(express.static(path.join(__dirname, "public")));
 app.use(passport.initialize());
 app.use(passport.session());
+app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/login", (req, res) => {
-  res.render("login", { title: "Please Login" });
-});
+// app.get("/login", (req, res) => {
+//   res.render("index", { title: "Express" });
+// });
 
 app.get(
   "/auth/yahoo",
   passport.authenticate("oauth2", {
     successRedirect: "/",
-    failureRedirect: "/login"
+    failureRedirect: "/"
   }),
   (req, res, user) => {
     res.redirect("/");
@@ -151,7 +174,7 @@ app.get(
 
 app.get(
   "/auth/yahoo/callback",
-  passport.authenticate("oauth2", { failureRedirect: "/login" }),
+  passport.authenticate("oauth2", { failureRedirect: "/" }),
   (req, res) => {
     res.redirect(req.session.redirect || "/");
   }
@@ -160,10 +183,22 @@ app.get(
 app.get("/logout", (req, res) => {
   req.logout();
 
-  return res.redirect("/login");
+  return res.redirect("/");
 });
 
-app.use("/", checkAuth, index);
+// TODO: remove
+app.use(function(req, res, next) {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept"
+  );
+
+  next();
+});
+
+app.use("/", index);
+app.use("/api", checkAuth, api);
 
 function checkAuth(req, res, next) {
   let userObj;
@@ -174,10 +209,12 @@ function checkAuth(req, res, next) {
       avatar: req.user.avatar
     };
 
+    app.yf.setUserToken(req.user.access_token);
+
     return next();
   } else {
     userObj = null;
-    return res.redirect("/login");
+    return res.redirect("/");
   }
 }
 
@@ -200,3 +237,25 @@ app.use(function(err, req, res, next) {
 });
 
 module.exports = app;
+
+// APP FLOW
+// LOGIN
+// Get all of the users active baseball H2H leagues (user.games)
+// User select League
+// Get league settings - (league.settings)
+// scoring stats (settings.stat_categories)
+// current week (current_week))
+
+// FOR WEEKLY MATCHUPS
+// get current week scoreboard (league.scoreboard)
+// loop through each team "stats"
+// build json package and send to front end
+// cache results for weeks that are complete
+// cache weekly matchup data daily for subsequent requests
+// need a way to clear the cache and rebuild for stat adjustments
+
+// FOR ROTO POINTS
+// Get league teams with stats subresource (teams.leagues w/ stats)
+// loop through each team "stats"
+// build json payload for front end
+// cache daily for subsequent requests
